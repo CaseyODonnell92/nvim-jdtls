@@ -879,5 +879,53 @@ function M.set_runtime(runtime)
   end
 end
 
+---@private
+--- This is shamelessly stolen from vim.lsp.handlers.
+--- It was necessary to duplicate as we need to inject a function to change the presentation of the quickfix list, but
+--- the function is private in the neovim library script.
+---
+--- return a function that converts LSP responses to list items and opens the list
+---
+--- the returned function has an optional {config} parameter that accepts a table
+--- with the following keys:
+---
+---   loclist: (boolean) use the location list (default is to use the quickfix list)
+---
+---@param map_result function `((resp, bufnr) -> list)` to convert the response
+---@param entity name of the resource used in a `not found` error message
+local function response_to_list(map_result, entity)
+  return function(_,result, ctx, config)
+    if not result or vim.tbl_isempty(result) then
+      vim.notify('No ' .. entity .. ' found')
+    else
+      config = config or {}
+      if config.loclist then
+        vim.fn.setloclist(0, {}, ' ', {
+          title = 'Language Server';
+          items = map_result(result, ctx.bufnr);
+        })
+        api.nvim_command("lopen")
+      else
+        vim.fn.setqflist({}, ' ', {
+          title = 'Language Server';
+          items = map_result(result, ctx.bufnr),
+          -- Making the reference list is only supported when the quickfix list is used to display locations that can be
+          -- jumped to
+          quickfixtextfunc = util.pretty_jdt_qf;
+        })
+        api.nvim_command("copen")
+      end
+    end
+  end
+end
+
+function M.find_links()
+   local pos_params = util.make_position_params()
+   local find_links_params = {}
+   -- Check if there are other kinds of types for the find-links query
+   find_links_params.type = 'superImplementation'
+   find_links_params.position = pos_params
+   vim.lsp.buf_request(0, 'java/findLinks', find_links_params, response_to_list(util.locations_to_items, 'super-implementations'))
+end
 
 return M
