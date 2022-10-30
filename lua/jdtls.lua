@@ -1073,7 +1073,7 @@ function M.super_implementation(options)
       handler(err, result, ctx, vim.tbl_extend('force', config or {}, options))
     end
   else
-     req_handler = client.handlers[implementationMethodName] or vim.lsp.handlers[implementationMethodName]
+     req_handler = vim.lsp.handlers[implementationMethodName]
   end
   vim.lsp.buf_request(0, 'java/findLinks', find_links_params, req_handler)
 end
