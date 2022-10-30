@@ -1058,7 +1058,7 @@ end
 ---     - reuse_win: (boolean) Jump to existing window if buffer is already open.
 ---     - on_list: (function) handler for list results. See |lsp-on-list-handler|
 function M.super_implementation(options)
-  local find_links_params = util.make_position_params()
+  local find_links_params = vim.lsp.util.make_position_params()
   find_links_params.type = 'superImplementation'
 
   local implementationMethodName = 'textDocument/implementation'
