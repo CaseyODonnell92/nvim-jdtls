@@ -1,10 +1,12 @@
+---@mod jdtls.dap nvim-dap support for jdtls
+
 local api = vim.api
 local uv = vim.loop
 local util = require('jdtls.util')
 local resolve_classname = util.resolve_classname
 local with_java_executable = util.with_java_executable
 local M = {}
-
+local default_config_overrides = {}
 
 local function fetch_needs_preview(mainclass, project, cb, bufnr)
   local params = {
@@ -144,6 +146,7 @@ local function make_junit_request_args(lens, uri)
       fullName = classname,
       testName = methodname,
       project = lens.project,
+      projectName = lens.project,
       scope = lens.level,
       testKind = lens.kind,
     }
@@ -222,6 +225,10 @@ local function fetch_launch_args(lens, context, on_launch_args)
   util.execute_command(cmd_junit_args, function(err, launch_args)
     if err then
       print('Error retrieving launch arguments: ' .. (err.message or vim.inspect(err)))
+    elseif not launch_args then
+      error((
+        'Server must return launch_args as response to "vscode.java.test.junit.argument" command. '
+        .. 'Check server logs via `:JdtShowlogs`. Sent: ' .. vim.inspect(req_arguments)))
     else
       -- the classpath in the launch_args might be missing some classes
       -- See https://github.com/microsoft/vscode-java-test/issues/1073
@@ -278,7 +285,7 @@ local function get_first_class_lens(lenses)
 end
 
 
-local function make_config(lens, launch_args)
+local function make_config(lens, launch_args, config_overrides)
   local config = {
     name = lens.fullName;
     type = 'java';
@@ -291,6 +298,7 @@ local function make_config(lens, launch_args)
     vmArgs = table.concat(launch_args.vmArguments, ' ');
     noDebug = false;
   }
+  config = vim.tbl_extend('force', config, config_overrides or default_config_overrides)
   if lens.testKind == TestKind.TestNG or lens.kind == TestKind.TestNG then
     config.mainClass = 'org.testng.TestNG'
     -- id is in the format <project>@<class>#<method>
@@ -335,6 +343,7 @@ local function maybe_repeat(lens, config, context, opts, items)
 end
 
 
+---@param opts JdtTestOpts
 local function run(lens, config, context, opts)
   local ok, dap = pcall(require, 'dap')
   if not ok then
@@ -347,7 +356,13 @@ local function run(lens, config, context, opts)
   local junit = require('jdtls.junit')
 
   if lens.kind == TestKind.TestNG then
-    dap.run(config)
+    dap.run(config, {
+      after = function()
+        if opts.after_test then
+          opts.after_test()
+        end
+      end
+    })
     return
   end
 
@@ -370,6 +385,9 @@ local function run(lens, config, context, opts)
       server:close()
       local items = test_results.show()
       maybe_repeat(lens, config, context, opts, items)
+      if opts.after_test then
+        opts.after_test(items)
+      end
     end;
   })
 end
@@ -384,7 +402,8 @@ M.experimental = {
   make_config = make_config,
 }
 
-
+--- Debug the test class in the current buffer
+--- @param opts JdtTestOpts|nil
 function M.test_class(opts)
   opts = opts or {}
   local context = make_context()
@@ -395,13 +414,15 @@ function M.test_class(opts)
       return
     end
     fetch_launch_args(lens, context, function(launch_args)
-      local config = make_config(lens, launch_args)
+      local config = make_config(lens, launch_args, opts.config_overrides)
       run(lens, config, context, opts)
     end)
   end)
 end
 
 
+--- Debug the nearest test method in the current buffer
+--- @param opts nil|JdtTestOpts
 function M.test_nearest_method(opts)
   opts = opts or {}
   local lnum = api.nvim_win_get_cursor(0)[1]
@@ -413,13 +434,15 @@ function M.test_nearest_method(opts)
       return
     end
     fetch_launch_args(lens, context, function(launch_args)
-      local config = make_config(lens, launch_args)
+      local config = make_config(lens, launch_args, opts.config_overrides)
       run(lens, config, context, opts)
     end)
   end)
 end
 
 
+--- Prompt for a test method from the current buffer to run
+---@param opts nil|JdtTestOpts
 function M.pick_test(opts)
   opts = opts or {}
   local context = make_context()
@@ -433,7 +456,7 @@ function M.pick_test(opts)
           return
         end
         fetch_launch_args(lens, context, function(launch_args)
-          local config = make_config(lens, launch_args)
+          local config = make_config(lens, launch_args, opts.config_overrides)
           run(lens, config, context, opts)
         end)
       end
@@ -451,7 +474,16 @@ local hotcodereplace_type = {
 }
 
 
-function M.fetch_main_configs(callback)
+--- Discover executable main functions in the project
+---@param opts nil|JdtMainConfigOpts See |JdtMainConfigOpts|
+---@param callback fun(configurations: table[])
+function M.fetch_main_configs(opts, callback)
+  opts = opts or {}
+  if type(opts) == 'function' then
+    vim.notify('First argument to `fetch_main_configs` changed to a `opts` table', vim.log.levels.WARN)
+    callback = opts
+    opts = {}
+  end
   local configurations = {}
   local bufnr = api.nvim_get_current_buf()
   util.execute_command({command = 'vscode.java.resolveMainClass'}, function(err, mainclasses)
@@ -475,7 +507,7 @@ function M.fetch_main_configs(callback)
             end
             local config = {
               type = 'java';
-              name = 'Launch ' .. mainclass;
+              name = 'Launch ' .. (project or '') .. ': ' .. mainclass;
               projectName = project;
               mainClass = mainclass;
               modulePaths = paths[1];
@@ -485,6 +517,7 @@ function M.fetch_main_configs(callback)
               console = 'integratedTerminal';
               vmArgs = use_preview and '--enable-preview' or nil;
             }
+            config = vim.tbl_extend('force', config, opts.config_overrides or default_config_overrides)
             table.insert(configurations, config)
             if remaining == 0 then
               callback(configurations)
@@ -496,7 +529,16 @@ function M.fetch_main_configs(callback)
   end, bufnr)
 end
 
+---@class JdtMainConfigOpts
+---@field config_overrides nil|JdtDapConfig Overrides for the |dap-configuration|, see |JdtDapConfig|
+
+
+
 local orig_configurations
+
+
+--- Discover main classes in the project and setup |dap-configuration| entries for Java for them.
+---@param opts nil|JdtSetupMainConfigOpts See |JdtSetupMainConfigOpts|
 function M.setup_dap_main_class_configs(opts)
   opts = opts or {}
   local status, dap = pcall(require, 'dap')
@@ -514,7 +556,7 @@ function M.setup_dap_main_class_configs(opts)
   if opts.verbose then
     vim.notify('Fetching debug configurations')
   end
-  M.fetch_main_configs(function(configurations)
+  M.fetch_main_configs(opts, function(configurations)
     for _, config in pairs(configurations) do
       table.insert(current_configurations, config)
     end
@@ -525,7 +567,13 @@ function M.setup_dap_main_class_configs(opts)
   end)
 end
 
+---@class JdtSetupMainConfigOpts : JdtMainConfigOpts
+---@field verbose nil|boolean Print notifications on start and once finished. Default is false.
 
+
+
+--- Register a |dap-adapter| for java. Requires nvim-dap
+---@param opts nil|JdtSetupDapOpts See |JdtSetupDapOpts|
 function M.setup_dap(opts)
   local status, dap = pcall(require, 'dap')
   if not status then
@@ -536,6 +584,7 @@ function M.setup_dap(opts)
     return
   end
   opts = opts or {}
+  default_config_overrides = opts.config_overrides or {}
   dap.listeners.before['event_hotcodereplace']['jdtls'] = function(session, body)
     if body.changeType == hotcodereplace_type.BUILD_COMPLETE then
       if opts.hotcodereplace == 'auto' then
@@ -550,7 +599,20 @@ function M.setup_dap(opts)
   end
   dap.adapters.java = start_debug_adapter
 end
+---@class JdtSetupDapOpts
+---@field config_overrides JdtDapConfig These will be used as default overrides for |jdtls.dap.test_class|, |jdtls.dap.test_nearest_method| and discovered main classes
+---@field hotcodereplace nil|"auto"
 
 
+---@class JdtDapConfig
+---@field cwd string|nil working directory for the test
+---@field vmArgs string|nil vmArgs for the test
+---@field noDebug boolean|nil If the test should run in debug mode
+
+---@class JdtTestOpts
+---@field config nil|table Skeleton used for the |dap-configuration|
+---@field config_overrides nil|JdtDapConfig Overrides for the |dap-configuration|, see |JdtDapConfig|
+---@field until_error number|nil Number of times the test should be repeated if it doesn't fail
+---@field after_test nil|function Callback triggered after test run
 
 return M

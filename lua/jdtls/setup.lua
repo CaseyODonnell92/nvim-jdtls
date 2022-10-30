@@ -4,6 +4,7 @@ local uv = vim.loop
 local path = require('jdtls.path')
 local M = {}
 local URI_SCHEME_PATTERN = '^([a-zA-Z]+[a-zA-Z0-9+-.]*)://.*'
+local data_dir = nil
 
 
 local status_callback = function(_, result)
@@ -31,6 +32,16 @@ do
         client_id_by_root_dir[root_dir] = client_id
       end
       lsp.buf_attach_client(bufnr, client_id)
+  end
+
+  function lsp_clients.stop()
+    for root_dir, client_id in pairs(client_id_by_root_dir) do
+      local client = lsp.get_client_by_id(client_id)
+      if client then
+        client.stop()
+        client_id_by_root_dir[root_dir] = nil
+      end
+    end
   end
 
   function lsp_clients.restart()
@@ -61,7 +72,7 @@ local function progress_report(_, result, ctx)
   -- Messages are only cleared on consumption, so protect against messages
   -- filling up infinitely if user doesn't consume them by discarding new ones.
   -- Ring buffer would be nicer, but messages.progress is a dict
-  if vim.tbl_count(client.messages.progress) > 10 then
+  if vim.tbl_count(client.messages.progress) > 100 then
     return
   end
   client.messages.progress[result.id or 'DUMMY'] = {
@@ -96,7 +107,7 @@ function M.find_root(markers, bufname)
   local getparent = function(p)
     return vim.fn.fnamemodify(p, ':h')
   end
-  while not (getparent(dirname) == dirname) do
+  while getparent(dirname) ~= dirname do
     for _, marker in ipairs(markers) do
       if uv.fs_stat(path.join(dirname, marker)) then
         return dirname
@@ -117,6 +128,7 @@ M.extendedClientCapabilities = {
   generateConstructorsPromptSupport = true;
   generateDelegateMethodsPromptSupport = true;
   moveRefactoringSupport = true;
+  overrideMethodsPromptSupport = true;
   inferSelectionSupport = {"extractMethod", "extractVariable", "extractConstant"};
 };
 
@@ -180,6 +192,18 @@ local function maybe_implicit_save()
 end
 
 
+local function extract_data_dir(cmd)
+  for i, part in pairs(cmd) do
+    -- jdtls helper script uses `--data`, java jar command uses `-data`.
+    if part == '-data' or part == '--data' then
+      data_dir = cmd[i + 1]
+      return data_dir
+    end
+  end
+  return nil
+end
+
+
 function M.start_or_attach(config)
   assert(config, 'config is required')
   assert(
@@ -191,7 +215,8 @@ function M.start_or_attach(config)
     tonumber(vim.fn.executable(config.cmd[1])) == 1,
     'LSP cmd must be an executable: ' .. config.cmd[1]
   )
-  config.name = config.name or 'jdt.ls'
+  config.name = 'jdtls'
+  data_dir = extract_data_dir(config.cmd)
 
   local bufnr = api.nvim_get_current_buf()
   local bufname = api.nvim_buf_get_name(bufnr)
@@ -211,7 +236,7 @@ function M.start_or_attach(config)
   config.handlers['language/progressReport'] = config.handlers['language/progressReport'] or progress_report
   config.handlers['language/status'] = config.handlers['language/status'] or status_callback
   config.handlers['workspace/configuration'] = config.handlers['workspace/configuration'] or configuration_handler
-  local capabilities = config.capabilities or lsp.protocol.make_client_capabilities()
+  local capabilities = vim.tbl_deep_extend('keep', config.capabilities or {}, lsp.protocol.make_client_capabilities())
   local extra_capabilities = {
     textDocument = {
       codeAction = {
@@ -245,17 +270,72 @@ function M.start_or_attach(config)
 end
 
 
+function M.wipe_data_and_restart()
+  if not data_dir then
+    vim.notify(
+      "Data directory wasn't detected. " ..
+      "You must call `start_or_attach` at least once and the cmd must include a `-data` parameter (or `--data` if using the official `jdtls` wrapper)")
+    return
+  end
+  local opts = {
+    prompt = 'Are you sure you want to wipe the data folder: ' .. data_dir .. ' and restart? ',
+  }
+  vim.ui.select({'Yes', 'No'}, opts, function(choice)
+    if choice ~= 'Yes' then
+      return
+    end
+    vim.schedule(function()
+      lsp_clients.stop()
+      vim.defer_fn(function()
+        vim.fn.delete(data_dir, 'rf')
+        for _, buf in pairs(api.nvim_list_bufs()) do
+          if vim.bo[buf].filetype == 'java' then
+            api.nvim_buf_call(buf, function() vim.cmd('e!') end)
+          end
+        end
+      end, 200)
+    end)
+  end)
+end
+
+
 function M.add_commands()
-  api.nvim_command [[command! -buffer -nargs=? -complete=custom,v:lua.require'jdtls'._complete_compile JdtCompile lua require('jdtls').compile(<f-args>)]]
-  api.nvim_command [[command! -buffer -nargs=? -complete=custom,v:lua.require'jdtls'._complete_set_runtime JdtSetRuntime lua require('jdtls').set_runtime(<f-args>)]]
-  api.nvim_command [[command! -buffer JdtUpdateConfig lua require('jdtls').update_project_config()]]
-  api.nvim_command [[command! -buffer -nargs=* JdtJol lua require('jdtls').jol(<f-args>)]]
-  api.nvim_command [[command! -buffer JdtBytecode lua require('jdtls').javap()]]
-  api.nvim_command [[command! -buffer JdtJshell lua require('jdtls').jshell()]]
-  api.nvim_command [[command! -buffer JdtRestart lua require('jdtls.setup').restart()]]
+  vim.cmd [[command! -buffer -nargs=? -complete=custom,v:lua.require'jdtls'._complete_compile JdtCompile lua require('jdtls').compile(<f-args>)]]
+  vim.cmd [[command! -buffer -nargs=? -complete=custom,v:lua.require'jdtls'._complete_set_runtime JdtSetRuntime lua require('jdtls').set_runtime(<f-args>)]]
+  vim.cmd [[command! -buffer JdtUpdateConfig lua require('jdtls').update_project_config()]]
+  vim.cmd [[command! -buffer -nargs=* JdtJol lua require('jdtls').jol(<f-args>)]]
+  vim.cmd [[command! -buffer JdtBytecode lua require('jdtls').javap()]]
+  vim.cmd [[command! -buffer JdtJshell lua require('jdtls').jshell()]]
+  vim.cmd [[command! -buffer JdtRestart lua require('jdtls.setup').restart()]]
   local ok, dap = pcall(require, 'dap')
   if ok and dap.adapters.java then
     api.nvim_command "command! -buffer JdtRefreshDebugConfigs lua require('jdtls.dap').setup_dap_main_class_configs({ verbose = true })"
+    local redefine_classes = function()
+      local session = dap.session()
+      if not session then
+        vim.notify('No active debug session')
+      else
+        vim.notify('Applying code changes')
+        session:request('redefineClasses', nil, function(err)
+          assert(not err, vim.inspect(err))
+        end)
+      end
+    end
+    api.nvim_create_user_command('JdtHotcodeReplace', redefine_classes, {
+      desc = "Trigger reload of changed classes for current debug session",
+    })
+  end
+end
+
+
+function M.show_logs()
+  if data_dir then
+    vim.cmd('split | e ' .. data_dir .. '/.metadata/.log | normal G')
+  end
+  if vim.fn.has('nvim-0.8') == 1 then
+    vim.cmd('vsplit | e ' .. vim.fn.stdpath('log') .. '/lsp.log | normal G')
+  else
+    vim.cmd('vsplit | e ' .. vim.fn.stdpath('cache') .. '/lsp.log | normal G')
   end
 end
 

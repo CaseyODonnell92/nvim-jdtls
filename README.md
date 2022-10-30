@@ -2,7 +2,6 @@
 
 Extensions for the built-in [Language Server Protocol][1] support in [Neovim][2] (>= 0.6.0) for [eclipse.jdt.ls][3].
 
-
 ## Audience
 
 This project follows the [KISS principle][kiss] and targets users with some
@@ -34,29 +33,55 @@ alternative:
   - [x] Move package, instance method, static method or type
 - [x] `javap` command to show bytecode of current file
 - [x] `jol` command to show memory usage of current file (`jol_path` must be set)
-- [x] `jshell` command to open up jshell with classpath from project set
+- [x] `jshell` command to open up `jshell` with `classpath` from project set
 - [x] Debugger support via [nvim-dap][5]
-
 
 Take a look at [a demo](https://github.com/mfussenegger/nvim-jdtls/issues/3) to
 see some of the functionality in action.
 
-
 ## Plugin Installation
 
-- Requires Neovim (>= 0.6.0)
+- Requires Neovim (Latest stable (recommended) or nightly)
 - nvim-jdtls is a plugin. Install it like any other Vim plugin:
-  - If using [vim-plug][14]: `Plug 'mfussenegger/nvim-jdtls'`
-  - If using [packer.nvim][15]: `use 'mfussenegger/nvim-jdtls'`
+  - `git clone https://github.com/mfussenegger/nvim-jdtls.git ~/.config/nvim/pack/plugins/start/nvim-jdtls`
+  - Or with [vim-plug][14]: `Plug 'mfussenegger/nvim-jdtls'`
+  - Or with [packer.nvim][15]: `use 'mfussenegger/nvim-jdtls'`
 
 ## Language Server Installation
 
 Install [eclipse.jdt.ls][3] by following their [Installation instructions](https://github.com/eclipse/eclipse.jdt.ls#installation).
 
-## Configuration
+
+## Configuration (quickstart)
+
+Add the following to `~/.config/nvim/ftplugin/java.lua` (See `:help base-directory`):
+
+```lua
+local config = {
+    cmd = {'/path/to/jdt-language-server/bin/jdtls'},
+    root_dir = vim.fs.dirname(vim.fs.find({'.gradlew', '.git', 'mvnw'}, { upward = true })[1]),
+}
+require('jdtls').start_or_attach(config)
+```
+
+**Important**:
+
+- eclipse.jdt.ls requires Java 17
+- You'll have to teach eclipse.jdt.ls about your JDK installations by setting
+  up `runtimes` if your projects use a different Java version than the one
+  you're using for eclipse.jdt.ls itself. See `Java XY language features are
+  not available` in the troubleshooting section further below to learn how to
+  do that.
+
+This should get you started, but will create temporary eclipse data folders
+when you open a project. Please read the `Configuration (verbose)` section if
+you want more control over the configuration or want to understand how things
+work.
+
+## Configuration (verbose)
 
 To configure `nvim-jdtls`, add the following in `ftplugin/java.lua` within the
-neovim configuration base directory (e.g. `~/.config/nvim/ftplugin/java.lua`,
+Neovim configuration base directory (e.g. `~/.config/nvim/ftplugin/java.lua`,
 see `:help base-directory`).
 
 Watch out for the 💀, it indicates that you must adjust something.
@@ -70,7 +95,7 @@ local config = {
   cmd = {
 
     -- 💀
-    'java', -- or '/path/to/java11_or_newer/bin/java'
+    'java', -- or '/path/to/java17_or_newer/bin/java'
             -- depends on if `java` is in your $PATH env variable and if it points to the right version.
 
     '-Declipse.application=org.eclipse.jdt.ls.core.id1',
@@ -172,10 +197,9 @@ local config = {
 `...` is not valid Lua in this context. It is meant as placeholder for the
 other options from the [Configuration](#configuration) section above.)
 
-
 ### nvim-lspconfig and nvim-jdtls differences
 
-Both nvim-lspconfig and nvim-jdtls use the client built into neovim:
+Both [nvim-lspconfig][9] and nvim-jdtls use the client built into neovim:
 
 ```txt
   ┌────────────┐           ┌────────────────┐
@@ -210,12 +234,10 @@ handling.
 You **must not** use both at the same time for java. You'd end up with two
 clients and two language server instances.
 
-
 ### UI picker customization
 
 **Tip**: You can get a better UI for code-actions and other functions by
 overriding the `jdtls.ui` picker. See [UI Extensions][10].
-
 
 ## Usage
 
@@ -257,6 +279,9 @@ command! -buffer JdtBytecode lua require('jdtls').javap()
 command! -buffer JdtJshell lua require('jdtls').jshell()
 ```
 
+## API Reference
+
+See `:help jdtls`
 
 ## Debugger (via nvim-dap)
 
@@ -285,13 +310,13 @@ require'jdtls'.test_nearest_method()
 - Clone [java-debug][6]
 - Navigate into the cloned repository (`cd java-debug`)
 - Run `./mvnw clean install`
-- Set or extend the `initializationOptions` (= `init_options` of the `config` from [configuration](#Configuration)) as follows:
+- Set or extend the `initializationOptions` (= `init_options` of the `config` from [configuration](#Configuration-verbose)) as follows:
 
 
 ```lua
 config['init_options'] = {
   bundles = {
-    vim.fn.glob("path/to/java-debug/com.microsoft.java.debug.plugin/target/com.microsoft.java.debug.plugin-*.jar")
+    vim.fn.glob("path/to/java-debug/com.microsoft.java.debug.plugin/target/com.microsoft.java.debug.plugin-*.jar", 1)
   };
 }
 ```
@@ -301,24 +326,27 @@ config['init_options'] = {
 You also need to call `require('jdtls').setup_dap()` to have it register a
 `java` adapter.
 
-To do that, extend the [configuration](#Configuration):
+To do that, extend the [configuration](#Configuration-verbose):
 
 ```lua
 config['on_attach'] = function(client, bufnr)
   -- With `hotcodereplace = 'auto' the debug adapter will try to apply code changes
   -- you make during a debug session immediately.
   -- Remove the option if you do not want that.
+  -- You can use the `JdtHotcodeReplace` command to trigger it manually
   require('jdtls').setup_dap({ hotcodereplace = 'auto' })
 end
 ```
 
-If you also want to discover main classes and create configuration entries for them, you have to call `require('jdtls.dap').setup_dap_main_class_configs()` or use the `JdtRefreshDebugConfigs` command which is added as part of `add_commands()` which is mentioned in the [Usage](#Usage) section.
+### nvim-dap configuration
 
-Note that eclipse.jdt.ls needs to have loaded your project before it can discover all main classes and that may take some time. It is best to trigger this deferred or ad-hoc when first required.
+`nvim-jdtls` includes functionality to discover main classes and create `nvim-dap` configuration entries for them.
 
+To discover the main classes you have to call `require('jdtls.dap').setup_dap_main_class_configs()` or use the `JdtRefreshDebugConfigs` command. It will only discover classes once eclipse.jdt.ls fully loaded the project. Depending on the project that may take a while. Because of that, calling `require('jdtls.dap').setup_dap_main_class_configs()` as part of an `on_attach` handler may not work well.
 
-See the [nvim-dap Adapter Installation Wiki](https://github.com/mfussenegger/nvim-dap/wiki/Debug-Adapter-installation#Java)
-for example configurations in case you're not going to use the main-class discovery functionality of nvim-jdtls.
+For manual configuration see [nvim-dap Adapter Installation Wiki](https://github.com/mfussenegger/nvim-dap/wiki/Java).
+
+To get an overview of all available `attach` and `launch` options, take a look at [java-debug options](https://github.com/microsoft/vscode-java-debug#options). Keep in mind that any `java.debug` options are settings of the vscode-java client extension and not understood by the debug-adapter itself.
 
 ### vscode-java-test installation
 
@@ -335,11 +363,11 @@ To be able to debug junit tests, it is necessary to install the bundles from [vs
 
 -- This bundles definition is the same as in the previous section (java-debug installation)
 local bundles = {
-  vim.fn.glob("path/to/java-debug/com.microsoft.java.debug.plugin/target/com.microsoft.java.debug.plugin-*.jar"),
+  vim.fn.glob("path/to/java-debug/com.microsoft.java.debug.plugin/target/com.microsoft.java.debug.plugin-*.jar", 1),
 };
 
 -- This is the new part
-vim.list_extend(bundles, vim.split(vim.fn.glob("/path/to/microsoft/vscode-java-test/server/*.jar"), "\n"))
+vim.list_extend(bundles, vim.split(vim.fn.glob("/path/to/microsoft/vscode-java-test/server/*.jar", 1), "\n"))
 config['init_options'] = {
   bundles = bundles;
 }
@@ -347,30 +375,46 @@ config['init_options'] = {
 
 ## Troubleshooting
 
-### Nothing happens when invoking vim.lsp.buf functions
+### The client exits with an error / eclipse.jdt.ls stopped working
 
 This can have two reasons:
 
-#### The client and server aren't starting up correctly
+1) Your `cmd` definition in the [Configuration](#configuration) is wrong.
 
-You can check if the client is running with `:lua print(vim.inspect(vim.lsp.buf_get_clients()))`, it should output a lot of information.
-If it doesn't, verify:
+- Check the log files. Use `:JdtShowLogs` or open the log file manually. `:lua
+  print(vim.fn.stdpath('cache'))` lists the path, there should be a `lsp.log`.
+  You may have to increase the log level. See `:help vim.lsp.set_log_level()`.
 
-- That the language server can be started standalone. (Run eclipse.jdt.ls)
-- That there are no configuration errors. (Run `:set ft=java` and `:messages` after opening a Java file)
-- Check the log files (`:lua print(vim.fn.stdpath('cache'))` lists the path, there should be a `lsp.log`)
+- Ensure you can start the language server standalone by invoking the `cmd`
+  defined in the configuration manually within a terminal.
 
-#### Eclipse.jdt.ls can't compile your project or it cannot load your project and resolve the class paths
+2) The data folder got corrupted.
 
-- Run `:JdtCompile` for incremental compilation or `:JdtCompile full` for full
-  compilation. If there are any errors in the project, it will open the
-  quickfix list with the errors.
+Wipe the folder and ensure that it is in a dedicated directory and not within
+your project repository. See [data directory
+configuration](#data-directory-configuration). You can use
+`:JdtWipeDataAndRestart` to do this.
 
-- Check the log files (`:lua print(vim.fn.stdpath('cache'))` lists the path, there should be a `lsp.log`)
-- If there is nothing, try changing the log level. See `:help vim.lsp.set_log_level()`
 
-If this all doesn't help, try wiping your workspace folder and restart Neovim.
-.he workspace folder is the path you used as argument to `-data` in `config.cmd`.
+### Nothing happens when opening a Java file and I can't use any `vim.lsp.buf` functions
+
+This can have several reasons:
+
+1) You didn't follow [Configuration](#configuration) closely and aren't
+invoking `require('jdtls').start_or_attach(config)` as part of a `java`
+`filetype` event. Go back to the configuration section and follow it closely.
+
+2) You made a mistake in your configuration and there is a failure happening
+when you open the file. Try `:set ft=java` and look at the `:messages` output.
+
+3) eclipse.jdt.ls is starting but it cannot recognize your project, or it
+cannot import it properly. Try running `:JdtCompile full` or `:lua
+require('jdtls').compile('full')`. It should open the `quickfix` list with errors
+if eclipse.jdt.ls started but cannot handle your project.
+
+Check the log files. Use `:JdtShowLogs` or open the log file manually. `:lua
+print(vim.fn.stdpath('cache'))` lists the path, there should be a `lsp.log`.
+You may have to increase the log level. See `:help vim.lsp.set_log_level()`.
 
 
 ### Error: Unable to access jarfile
@@ -381,7 +425,7 @@ either need to write them out or wrap the fragments in `vim.fn.expand` calls.
 
 ### Unrecognized option: --add-modules=ALL-SYSTEM
 
-Eclipse.jdt.ls requires at least Java 11. You're using a lower version.
+Eclipse.jdt.ls requires at least Java 17. You're using a lower version.
 
 ### is a non-project file, only syntax errors are reported
 
@@ -468,10 +512,10 @@ of the file on disk diverges with the mental model of the language server. If
 that happens, you need to open all changed files within Neovim and reload them
 with `:e!` to synchronize the state.
 
-### eclipse.jdt.ls stopped starting
+### Indentation settings from eclipse formatting configuration are not recognized
 
-Try wiping your workspace folder and restart Neovim. The workspace folder is
-the path you used as argument to `-data` in `config.cmd`
+This is expected. The Neovim `shiftwidth` and `tabstop` settings have a higher
+priority.
 
 
 [1]: https://microsoft.github.io/language-server-protocol/
@@ -480,12 +524,9 @@ the path you used as argument to `-data` in `config.cmd`
 [5]: https://github.com/mfussenegger/nvim-dap
 [6]: https://github.com/microsoft/java-debug
 [7]: https://github.com/microsoft/vscode-java-test
-[8]: https://github.com/eclipse/eclipse.jdt.ls/wiki/Running-the-JAVA-LS-server-from-the-command-line
 [9]: https://github.com/neovim/nvim-lspconfig
 [10]: https://github.com/mfussenegger/nvim-jdtls/wiki/UI-Extensions
 [11]: https://github.com/mfussenegger/nvim-jdtls/wiki/Sample-Configurations
-[12]: https://download.eclipse.org/jdtls/milestones/
-[13]: https://download.eclipse.org/jdtls/snapshots/?d
 [14]: https://github.com/junegunn/vim-plug
 [15]: https://github.com/wbthomason/packer.nvim
 [kiss]: https://en.wikipedia.org/wiki/KISS_principle

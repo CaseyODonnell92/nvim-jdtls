@@ -1,14 +1,19 @@
+---@mod jdtls LSP extensions for Neovim and eclipse.jdt.ls
+
 local api = vim.api
 
 local ui = require('jdtls.ui')
 local util = require('jdtls.util')
 
 local with_java_executable = util.with_java_executable
+local with_classpaths = util.with_classpaths
 local resolve_classname = util.resolve_classname
 local execute_command = util.execute_command
 
 local jdtls_dap = require('jdtls.dap')
 local setup = require('jdtls.setup')
+
+local offset_encoding = 'utf-16'
 
 
 
@@ -18,16 +23,34 @@ local M = {
   test_nearest_method = jdtls_dap.test_nearest_method,
   pick_test = jdtls_dap.pick_test,
   extendedClientCapabilities = setup.extendedClientCapabilities,
-  start_or_attach = setup.start_or_attach,
   setup = setup,
   settings = {
     jdt_uri_timeout_ms = 5000,
   }
 }
 
-local request = function(bufnr, method, params, handler)
-  vim.lsp.buf_request(bufnr, method, params, handler)
+--- Start the language server (if not started), and attach the current buffer.
+--- @param config table configuration. See |vim.lsp.start_client|
+function M.start_or_attach(config)
+  setup.start_or_attach(config)
 end
+
+
+local request = function(bufnr, method, params, handler)
+  local client = nil
+  for _, c in pairs(vim.lsp.get_active_clients({ bufnr = bufnr })) do
+    if c.name == 'jdtls' then
+      client = c
+      break
+    end
+  end
+  if not client then
+    vim.notify("No LSP client with name `jdtls` available", vim.log.levels.WARN)
+  else
+    client.request(method, params, handler, bufnr)
+  end
+end
+
 local highlight_ns = api.nvim_create_namespace('jdtls_hl')
 M.jol_path = nil
 
@@ -35,7 +58,7 @@ M.jol_path = nil
 
 local function java_apply_workspace_edit(command)
   for _, argument in ipairs(command.arguments) do
-    vim.lsp.util.apply_workspace_edit(argument, 'utf-16')
+    vim.lsp.util.apply_workspace_edit(argument, offset_encoding)
   end
 end
 
@@ -67,7 +90,7 @@ local function java_generate_to_string_prompt(_, outer_ctx)
         return
       end
       if edit then
-        vim.lsp.util.apply_workspace_edit(edit, 'utf-16')
+        vim.lsp.util.apply_workspace_edit(edit, offset_encoding)
       end
     end)
   end)
@@ -95,9 +118,14 @@ local function java_generate_constructors_prompt(_, outer_ctx)
 
     local fields = status.fields
     if fields then
+      local opts = {
+        is_selected = function(item)
+          return item.isSelected
+        end
+      }
       fields = ui.pick_many(status.fields, 'Include field to initialize by constructor(s): ', function(x)
         return string.format('%s: %s', x.name, x.type)
-      end)
+      end, opts)
     end
 
     local params = {
@@ -109,7 +137,7 @@ local function java_generate_constructors_prompt(_, outer_ctx)
       if err1 then
         print("Could not execute java/generateConstructors: " .. err1.message)
       elseif edit then
-        vim.lsp.util.apply_workspace_edit(edit, 'utf-16')
+        vim.lsp.util.apply_workspace_edit(edit, offset_encoding)
       end
     end)
   end)
@@ -163,7 +191,7 @@ local function java_generate_delegate_methods_prompt(_, outer_ctx)
       if err1 then
         print('Could not execute java/generateDelegateMethods', err1.message)
       elseif workspace_edit then
-        vim.lsp.util.apply_workspace_edit(workspace_edit, 'utf-16')
+        vim.lsp.util.apply_workspace_edit(workspace_edit, offset_encoding)
       end
     end)
   end)
@@ -185,7 +213,7 @@ local function java_hash_code_equals_prompt(_, outer_ctx)
         print("Could not execute java/generateHashCodeEquals: " .. e.message)
       end
       if edit then
-        vim.lsp.util.apply_workspace_edit(edit, 'utf-16')
+        vim.lsp.util.apply_workspace_edit(edit, offset_encoding)
       end
     end)
   end)
@@ -202,7 +230,7 @@ local function handle_refactor_workspace_edit(err, result, ctx)
   end
 
   if result.edit then
-    vim.lsp.util.apply_workspace_edit(result.edit, 'utf-16')
+    vim.lsp.util.apply_workspace_edit(result.edit, offset_encoding)
   end
 
   if result.command then
@@ -483,7 +511,7 @@ local function java_action_organize_imports(_, ctx)
       return
     end
     if resp then
-      vim.lsp.util.apply_workspace_edit(resp, 'utf-16')
+      vim.lsp.util.apply_workspace_edit(resp, offset_encoding)
     end
   end)
 end
@@ -532,6 +560,37 @@ local function java_choose_imports(resp)
   return choices
 end
 
+local function java_override_methods(_, context)
+  request(context.bufnr, 'java/listOverridableMethods', context.params, function(e1, result1)
+    if e1 then
+      print("Error getting overridable methods: " .. e1.message)
+      return
+    end
+
+    local fmt = function(method)
+      return string.format("%s(%s) class: %s", method.name, table.concat(method.parameters, ", "), method.declaringClass)
+    end
+
+    local selected = ui.pick_many(result1.methods, "Method to override", fmt)
+
+    if #selected < 1 then
+      return
+    end
+
+    local params = {
+      context = context.params,
+      overridableMethods = selected
+    }
+    request(context.bufnr, 'java/addOverridableMethods', params, function(e2, result2)
+      if e2 ~= nil then
+        print("Error getting workspace edits: " .. e2.message)
+        return
+      end
+      vim.lsp.util.apply_workspace_edit(result2, offset_encoding)
+    end)
+  end)
+end
+
 
 M.commands = {
   ['java.apply.workspaceEdit'] = java_apply_workspace_edit;
@@ -543,6 +602,7 @@ M.commands = {
   ['java.action.organizeImports.chooseImports'] = java_choose_imports;
   ['java.action.generateConstructorsPrompt'] = java_generate_constructors_prompt;
   ['java.action.generateDelegateMethodsPrompt'] = java_generate_delegate_methods_prompt;
+  ['java.action.overrideMethodsPrompt'] = java_override_methods;
 }
 
 if vim.lsp.commands then
@@ -587,59 +647,123 @@ local function make_code_action_params(from_selection)
 end
 
 
+--- Organize the imports in the current buffer
 function M.organize_imports()
   java_action_organize_imports(nil, { params = make_code_action_params(false) })
 end
 
 
+---@private
 function M._complete_compile()
   return 'full\nincremental'
 end
 
-
-function M.compile(type)
+local function on_build_result(err, result, ctx)
   local CompileWorkspaceStatus = {
     FAILED = 0,
     SUCCEED = 1,
     WITHERROR = 2,
     CANCELLED = 3,
   }
-  request(0, 'java/buildWorkspace', type == 'full', function(err, result)
-    assert(not err, 'Error on `java/buildWorkspace`: ' .. vim.inspect(err))
-    if result == CompileWorkspaceStatus.SUCCEED then
-      vim.fn.setqflist({}, 'r', { title = 'jdtls'; items = {} })
-      print('Compile successfull')
+  assert(not err, 'Error trying to build project(s): ' .. vim.inspect(err))
+  if result == CompileWorkspaceStatus.SUCCEED then
+    vim.fn.setqflist({}, 'r', { title = 'jdtls'; items = {} })
+    print('Compile successfull')
+  else
+    vim.tbl_add_reverse_lookup(CompileWorkspaceStatus)
+    local project_config_errors = {}
+    local compile_errors = {}
+    local ns = vim.lsp.diagnostic.get_namespace(ctx.client_id)
+    for _, d in pairs(vim.diagnostic.get(nil, { namespace = ns })) do
+      local fname = api.nvim_buf_get_name(d.bufnr)
+      local stat = vim.loop.fs_stat(fname)
+      local items
+      if (vim.endswith(fname, 'build.gradle')
+          or vim.endswith(fname, 'pom.xml')
+          or (stat and stat.type == 'directory')) then
+        items = project_config_errors
+      elseif vim.fn.fnamemodify(fname, ':e') == 'java' then
+        items = compile_errors
+      end
+      if d.severity == vim.diagnostic.severity.ERROR and items then
+        table.insert(items, d)
+      end
+    end
+    local items = #project_config_errors > 0 and project_config_errors or compile_errors
+    vim.fn.setqflist({}, 'r', { title = 'jdtls'; items = vim.diagnostic.toqflist(items) })
+    if #items > 0 then
+      print(string.format('Compile error. (%s)', CompileWorkspaceStatus[result]))
+      vim.cmd('copen')
     else
-      vim.tbl_add_reverse_lookup(CompileWorkspaceStatus)
-      local project_config_errors = {}
-      local compile_errors = {}
-      for _, d in pairs(vim.diagnostic.get(nil)) do
-        local fname = api.nvim_buf_get_name(d.bufnr)
-        local stat = vim.loop.fs_stat(fname)
-        local items
-        if (vim.endswith(fname, 'build.gradle')
-            or vim.endswith(fname, 'pom.xml')
-            or (stat and stat.type == 'directory')) then
-          items = project_config_errors
-        elseif vim.fn.fnamemodify(fname, ':e') == 'java' then
-          items = compile_errors
+      print("Compile error, but no error diagnostics available."
+        .. " Save all pending changes and try running compile again."
+        .. " If you used incremental mode, try a full rebuild.")
+    end
+  end
+end
+
+
+--- Compile/build the Java workspace.
+--- If there are compile errors they'll be shown in the quickfix list.
+---
+---@param type nil|"full"|"incremental"
+function M.compile(type)
+  request(0, 'java/buildWorkspace', type == 'full', on_build_result)
+end
+
+
+---@param mode nil|"prompt"|"all"
+local function pick_projects(mode, on_projects)
+  local command = {
+    command = 'java.project.getAll',
+  }
+  local bufnr = api.nvim_get_current_buf()
+  util.execute_command(command, function(err, projects)
+    if err then
+      error(err.message or vim.inspect(err))
+    end
+    local selection
+    if mode == "all" then
+      selection = projects
+    elseif #projects == 1 then
+      selection = projects
+    else
+      selection = ui.pick_many(
+        projects,
+        'Projects> ',
+        function(project)
+          return vim.fn.fnamemodify(project, ':.:t')
         end
-        if d.severity == vim.diagnostic.severity.ERROR and items then
-          table.insert(items, d)
-        end
-      end
-      local items = #project_config_errors > 0 and project_config_errors or compile_errors
-      vim.fn.setqflist({}, 'r', { title = 'jdtls'; items = vim.diagnostic.toqflist(items) })
-      if #items > 0 then
-        print(string.format('Compile error. (%s)', CompileWorkspaceStatus[result]))
-        vim.cmd('copen')
-      else
-        print('Compile error, but no error diagnostics available. Try running compile again.')
-      end
+      )
+    end
+    on_projects(selection)
+  end, bufnr)
+end
+
+
+--- Trigger a rebuild of one or more projects.
+---
+---@param opts JdtBuildProjectOpts|nil optional configuration options
+function M.build_projects(opts)
+  opts = opts or {}
+  local bufnr = api.nvim_get_current_buf()
+  pick_projects(opts.select_mode or "prompt", function(selection)
+    if selection and next(selection) then
+      local params = {
+        identifiers = vim.tbl_map(function(project) return { uri = project } end, selection),
+        isFullBuild = opts.full_build == nil and true or opts.full_build
+      }
+      request(bufnr, 'java/buildProjects', params, on_build_result)
     end
   end)
 end
+---@class JdtBuildProjectOpts
+---@field select_mode JdtProjectSelectMode Show prompt to select projects or select all. Defaults to "prompt"
+---@field full_build boolean full rebuild or incremental build. Defaults to true (full build)
 
+--- Update the project configuration (from Gradle or Maven).
+--- In a multi-module project this will only update the configuration of the
+--- module of the current buffer.
 function M.update_project_config()
   local params = { uri = vim.uri_from_bufnr(0) }
   request(0, 'java/projectConfigurationUpdate', params, function(err)
@@ -650,6 +774,27 @@ function M.update_project_config()
   end)
 end
 
+--- Process changes made to the Gradle or Maven configuration of one or more projects.
+--- Requires eclipse.jdt.ls >= 1.13.0
+---
+---@param opts JdtUpdateProjectsOpts|nil configuration options
+function M.update_projects_config(opts)
+  opts = opts or {}
+  local bufnr = api.nvim_get_current_buf()
+  pick_projects(opts.select_mode or "prompt", function(selection)
+    if selection and next(selection) then
+      local params = {
+        identifiers = vim.tbl_map(function(project) return { uri = project } end, selection)
+      }
+      vim.lsp.buf_notify(bufnr, 'java/projectConfigurationsUpdate', params)
+    end
+  end)
+end
+---@class JdtUpdateProjectsOpts
+---@field select_mode JdtProjectSelectMode|nil show prompt to select projects or select all. Defaults to "prompt"
+
+---@alias JdtProjectSelectMode "all"|"prompt"|nil
+--
 
 local function mk_extract(entity)
   return function(from_selection)
@@ -663,31 +808,26 @@ M.extract_variable = mk_extract('extractVariable')
 M.extract_method = mk_extract('extractMethod')
 
 
-local function with_classpaths(fn)
-  local is_test_file_cmd = {
-    command = 'java.project.isTestFile',
-    arguments = { vim.uri_from_bufnr(0) }
-  };
-  execute_command(is_test_file_cmd, function(err, is_test_file)
+--- Jump to the super implementation of the method under the cursor
+function M.super_implementation()
+  local params = {
+    type = 'superImplementation',
+    position = vim.lsp.util.make_position_params(0, offset_encoding),
+  }
+  request(0, 'java/findLinks', params, function(err, result)
     assert(not err, vim.inspect(err))
-    local options = vim.fn.json_encode({
-      scope = is_test_file and 'test' or 'runtime';
-    })
-    local cmd = {
-      command = 'java.project.getClasspaths';
-      arguments = { vim.uri_from_bufnr(0), options };
-    }
-    execute_command(cmd, function(err1, resp)
-      if err1 then
-        print('Error executing java.project.getClasspaths: ' .. err1.message)
-      else
-        fn(resp)
-      end
-    end)
+    if result and #result == 1 then
+      vim.lsp.util.jump_to_location(result[1], offset_encoding, true)
+    else
+      assert(result == nil or #result == 0, 'Expected one or zero results for `findLinks`')
+      vim.notify('No result found')
+    end
   end)
 end
 
 
+--- Run the `javap` tool in a terminal buffer.
+--- Sets the classpath based on the current project.
 function M.javap()
   with_classpaths(function(resp)
     local classname = resolve_classname()
@@ -699,6 +839,8 @@ function M.javap()
 end
 
 
+--- Run the `jshell` tool in a terminal buffer.
+--- Sets the classpath based on the current project.
 function M.jshell()
   with_classpaths(function(result)
     local buf = api.nvim_create_buf(false, true)
@@ -718,6 +860,27 @@ function M.jshell()
 end
 
 
+--- Run the `jol` tool in a terminal buffer to print the class layout
+--- You must configure `jol_path` to point to the `jol` jar file:
+---
+--- ```
+--- require('jdtls').jol_path = '/absolute/path/to/jol.jar`
+--- ```
+---
+--- https://github.com/openjdk/jol
+---
+--- Must be called from a regular java source file.
+---
+--- Examples:
+--- ```
+--- lua require('jdtls').jol()
+--- ```
+---
+--- ```
+--- lua require('jdtls').jol(nil, "java.util.ImmutableCollections$List12")
+--- ```
+---@param mode nil|"estimates"|"footprint"|"externals"|"internals"
+---@param classname string|nil fully qualified class name. Defaults to the current class.
 function M.jol(mode, classname)
   mode = mode or 'estimates'
   local jol = assert(M.jol_path, [[Path to jol must be set using `lua require('jdtls').jol_path = 'path/to/jol.jar'`]])
@@ -735,11 +898,14 @@ end
 
 
 --- Reads the uri into the current buffer
---
--- This requires at least one open buffer that is connected to the jdtls
--- language server.
---
---@param uri expected to be a `jdt://` uri
+---
+--- This requires at least one open buffer that is connected to the jdtls
+--- language server.
+---
+--- nvim-jdtls by defaults configures a `BufReadCmd` event which uses this function.
+--- You shouldn't need to call this manually.
+---
+--- @param uri string expected to be a `jdt://` uri
 function M.open_jdt_link(uri)
   local client
   for _, c in ipairs(vim.lsp.get_active_clients()) do
@@ -803,6 +969,7 @@ function M.open_jdt_link(uri)
 end
 
 
+---@private
 function M._complete_set_runtime()
   local client
   for _, c in pairs(vim.lsp.get_active_clients()) do
@@ -818,6 +985,10 @@ function M._complete_set_runtime()
   return table.concat(vim.tbl_map(function(runtime) return runtime.name end, runtimes), '\n')
 end
 
+--- Change the Java runtime.
+--- This requires a `settings.java.configuration.runtimes` configuration.
+---
+---@param runtime nil|string Java runtime. Prompts for runtime if nil
 function M.set_runtime(runtime)
   local client
   for _, c in pairs(vim.lsp.get_active_clients()) do
